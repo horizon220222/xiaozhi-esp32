@@ -14,6 +14,8 @@
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 64
 
+static constexpr uint32_t kAnimationTaskStackSize = 8192;
+
 EmojiController::EmojiController(Display* display) : display_(display) {
 }
 
@@ -38,7 +40,7 @@ void EmojiController::Initialize() {
     BaseType_t task_created = xTaskCreate(
         AnimationTask,    // 任务函数
         "AnimationTask",  // 任务名称
-        4096,            // 堆栈大小
+        kAnimationTaskStackSize,  // 堆栈大小
         this,            // 任务参数
         5,               // 任务优先级
         &animation_task_handle_  // 任务句柄
@@ -130,6 +132,12 @@ void EmojiController::AnimationTask(void* pvParameters) {
     while (true) {
         // 等待动画消息
         if (xQueueReceive(controller->animation_queue_, &msg, portMAX_DELAY) == pdPASS) {
+            // The emoji screen is created only when the user enters emoji mode.
+            if (controller->emoji_screen_ == nullptr || controller->left_eye_ == nullptr ||
+                controller->right_eye_ == nullptr) {
+                continue;
+            }
+
             // 如果是随机动画但随机动画被禁用，则跳过
             if (msg.type == AnimationType::RANDOM && !controller->random_animation_enabled_) {
                 ESP_LOGI(TAG, "AnimationTask: 随机动画已禁用，跳过执行");
@@ -355,7 +363,6 @@ void EmojiController::EyeCenter(bool update_display) {
 
     if (update_display) {
         if (emoji_screen_ == nullptr || left_eye_ == nullptr || right_eye_ == nullptr) {
-            ESP_LOGW(TAG, "EyeCenter: 屏幕或眼睛对象不存在");
             return;
         }
 
@@ -3180,7 +3187,7 @@ void EmojiController::InitEmoji() {
         BaseType_t task_created = xTaskCreate(
             AnimationTask,
             "AnimationTask",
-            4096,
+            kAnimationTaskStackSize,
             this,
             5,
             &animation_task_handle_
