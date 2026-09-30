@@ -1,10 +1,12 @@
 {
+    "type": "esp32-s3n16r8-emoji",
     "target": "esp32s3",
     "builds": [
         {
             "name": "esp32-s3n16r8-emoji",
             "sdkconfig_append": [
-                "CONFIG_OLED_SSD1306_128X64=y"
+                "CONFIG_OLED_SSD1306_128X64=y",
+                "CONFIG_COMPILER_CXX_EXCEPTIONS=y"
             ]
         }
     ]

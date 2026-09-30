@@ -11,7 +11,6 @@
 #include "servo_controller.h"
 #include "emotion_response_controller.h"
 
-#include <wifi_station.h>
 #include <esp_log.h>
 #include <string>
 #include <vector>
@@ -27,7 +26,6 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_ops.h>
-#include <driver/i2c.h>
 #include <driver/i2c_master.h>  // 添加新版I2C驱动API头文件
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
@@ -70,6 +68,8 @@ private:
 public:
     // 重写SetEmotion方法，根据小智AI框架识别的表情触发我们自己的表情动画
     virtual void SetEmotion(const char* emotion) override;
+
+    void SetupUI() override;
 
     EmojiDisplay(EmojiBoard* board, esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel,
                 int width, int height, bool flip_x, bool flip_y)
@@ -163,12 +163,12 @@ private:
         io_config.scl_speed_hz = 400 * 1000;
 
         // 使用新版I2C面板IO API
-        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c_v2(display_i2c_bus_, &io_config, &panel_io_));
+        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(display_i2c_bus_, &io_config, &panel_io_));
         ESP_LOGI(TAG, "LCD面板IO初始化成功");
 
         ESP_LOGI(TAG, "安装SSD1306驱动");
         esp_lcd_panel_dev_config_t panel_config = {};
-        panel_config.reset_gpio_num = -1;
+        panel_config.reset_gpio_num = GPIO_NUM_NC;
         panel_config.bits_per_pixel = 1;
 
         esp_lcd_panel_ssd1306_config_t ssd1306_config = {
@@ -192,17 +192,15 @@ private:
 
         // 使用自定义的EmojiDisplay类
         display_ = new EmojiDisplay(this, panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, true, true);
-
-        // 保存对话模式屏幕的引用
-        chat_screen_ = lv_screen_active();
     }
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             // 无论在哪种模式下，短按BOOT按钮都进入录音状态
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ResetWifiConfiguration();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
             }
             app.ToggleChatState();
         });
@@ -375,6 +373,15 @@ public:
         ProcessAIResponseInternal(message);
     }
 };
+
+void EmojiDisplay::SetupUI() {
+    if (IsSetupUICalled()) {
+        return;
+    }
+    OledDisplay::SetupUI();
+    DisplayLockGuard lock(this);
+    board_->chat_screen_ = lv_screen_active();
+}
 
 // 在EmojiBoard类定义后实现EmojiDisplay::SetChatMessage方法
 void EmojiDisplay::SetChatMessage(const char* role, const char* content) {
