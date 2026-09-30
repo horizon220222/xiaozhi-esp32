@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小智 ESP32-S3N16R8-Emoji 表情动画预览</title>
+<style>
+  :root{
+    --bg:#0d0f14; --panel:#161a22; --panel2:#1d222e; --line:#2a3142;
+    --text:#e8ecf4; --dim:#8b93a7; --accent:#4f8cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding:24px}
+  header{max-width:1200px;margin:0 auto 8px}
+  h1{font-size:22px;font-weight:700}
+  .sub{color:var(--dim);font-size:13px;margin-top:6px;line-height:1.7}
+  .sub code{background:var(--panel2);padding:1px 6px;border-radius:4px;color:#9fb6ff;font-size:12px}
+  .legend{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;font-size:12px;color:var(--dim)}
+  .legend span{background:var(--panel);border:1px solid var(--line);padding:3px 10px;border-radius:20px}
+  .controls{max-width:1200px;margin:18px auto 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .controls button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 14px;cursor:pointer}
+  .controls button:hover{border-color:var(--accent)}
+  .controls label{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:13px}
+  .controls input{accent-color:var(--accent)}
+  .grid{max-width:1200px;margin:22px auto 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 12px 10px;cursor:pointer;transition:transform .15s,border-color .15s}
+  .tile:hover{transform:translateY(-3px);border-color:var(--accent)}
+  .face{position:relative;width:100%;aspect-ratio:2/1;background:#05060a;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+  .face canvas{width:100%;height:100%;display:block}
+  .cap{margin-top:9px;display:flex;align-items:baseline;justify-content:space-between}
+  .cap b{font-size:14px;font-weight:600}
+  .cap i{font-style:normal;color:var(--dim);font-size:11px}
+  .star{color:#ffb454}
+  /* modal */
+  .modal{position:fixed;inset:0;background:rgba(5,6,10,.82);display:none;align-items:center;justify-content:center;z-index:50;backdrop-filter:blur(3px)}
+  .modal.open{display:flex}
+  .modal .box{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;width:min(560px,92vw)}
+  .modal .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .modal .head b{font-size:18px}
+  .modal .head button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;width:34px;height:34px;font-size:16px;cursor:pointer}
+  .big{width:100%;aspect-ratio:2/1;background:#05060a;border-radius:10px;display:flex;align-items:center;justify-content:center}
+  .big canvas{width:100%;height:100%}
+  .note{max-width:1200px;margin:22px auto 0;font-size:12px;color:var(--dim);line-height:1.8;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+  .note b{color:var(--text)}
+</style>
+</head>
+<body>
+<header>
+  <h1>小智 ESP32-S3N16R8-Emoji · 表情动画全局预览</h1>
+  <div class="sub">
+    按 <code>emoji_controller.h</code> 的 28 个 AnimationType 整理，并参考 <code>emoji_controller.cc</code> 的绘制逻辑制作浏览器模拟。
+    屏幕为 128×64 OLED，黑底白眼。所有格子同时循环播放；点击格子可放大查看。
+  </div>
+  <div class="legend">
+    <span>双眼基准：40×40，圆角 10，中心 (39,32)/(89,32)</span>
+    <span class="star">* 仅模拟无舵机时的屏幕回退动作</span>
+  </div>
+</header>
+
+<div class="controls">
+  <button id="toggle" type="button">暂停全部</button>
+  <button id="restart" type="button">重新播放</button>
+  <label>播放速度 <input id="speed" type="range" min="0.25" max="2" step="0.25" value="1"><output id="speedValue">1×</output></label>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<div class="modal" id="modal">
+  <div class="box">
+    <div class="head"><b id="mTitle"></b><button id="mClose">✕</button></div>
+    <div class="big"><canvas id="mCanvas" width="560" height="280"></canvas></div>
+  </div>
+</div>
+
+<div class="note">
+  <b>说明：</b>这是便于整体审阅的 Canvas 模拟，并非 LVGL 逐像素截图。表情只绘制源码中的眼睛、遮罩、泪滴和汗线；伺服舵机的实体运动无法在屏幕上显示。
+  唤醒和睡眠在源码中是立即切换状态，因此这里也用跳变表示。随机格按源码的概率选择眨眼、左右看、转圈和困惑。
+</div>
+
+<script>
+(function(){
+  var W=128, H=64, S=2;
+  var lerp=function(a,b,p){return a+(b-a)*p;};
+  var ease=function(p){return p*p*(3-2*p);};
+  var mod=function(t,p){return ((t%p)+p)%p;};
+
+  function defEyes(){return {l:{x:39,y:32,w:40,h:40,r:10},r:{x:89,y:32,w:40,h:40,r:10}};}
+
+  function rr(ctx,x,y,w,h,r){
+    r=Math.max(0,Math.min(r,w/2,h/2));
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function drawScene(ctx,t,anim){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle='#05060a';ctx.fillRect(0,0,W,H);
+    var s=anim(t);
+    ctx.fillStyle='#f4f6fb';
+    if(s.eyes){
+      var e=s.eyes;
+      rr(ctx,e.l.x-e.l.w/2,e.l.y-e.l.h/2,e.l.w,e.l.h,e.l.r);ctx.fill();
+      rr(ctx,e.r.x-e.r.w/2,e.r.y-e.r.h/2,e.r.w,e.r.h,e.r.r);ctx.fill();
+    }
+    // LVGL 在眼睛前面放置与屏幕同色的矩形，以遮住眼睛的一部分。
+    (s.masks||[]).forEach(function(points){
+      ctx.fillStyle='#05060a';ctx.beginPath();
+      points.forEach(function(p,i){if(i)ctx.lineTo(p[0],p[1]);else ctx.moveTo(p[0],p[1]);});
+      ctx.closePath();ctx.fill();
+    });
+    (s.extras||[]).forEach(function(x){
+      ctx.save();ctx.globalAlpha=typeof x.alpha==='number'?x.alpha:1;
+      ctx.strokeStyle='#f4f6fb';ctx.fillStyle='#f4f6fb';
+      if(x.type==='arc'){
+        ctx.lineWidth=x.lw||3;ctx.lineCap='round';
+        ctx.beginPath();ctx.arc(x.x,x.y,x.r,x.start,x.end);ctx.stroke();
+      }else if(x.type==='line'){
+        ctx.lineWidth=x.lw||3;ctx.lineCap='round';
+        ctx.beginPath();ctx.moveTo(x.x1,x.y1);ctx.lineTo(x.x2,x.y2);ctx.stroke();
+      }else if(x.type==='circle'){
+        ctx.beginPath();ctx.arc(x.x,x.y,x.r,0,2*Math.PI);ctx.fill();
+      }else if(x.type==='rect'){
+        ctx.fillRect(x.x,x.y,x.w,x.h);
+      }else if(x.type==='heart'){
+        ctx.save();ctx.translate(x.x,x.y);ctx.scale(x.s,x.s);ctx.beginPath();
+        ctx.moveTo(0,11);
+        ctx.bezierCurveTo(-21,-4,-15,-18,0,-8);
+        ctx.bezierCurveTo(15,-18,21,-4,0,11);
+        ctx.closePath();ctx.fill();ctx.restore();
+      }
+      ctx.restore();
+    });
+  }
+
+  // ---------- 各表情动画 ----------
+  function moodMasks(kind,p){
+    if(kind==='happy'){
+      var y=40-8*p;
+      return [
+        [[4,y],[70,y+8],[70,70],[4,70]],
+        [[58,y+8],[124,y],[124,70],[58,70]]
+      ];
+    }
+    var low=25+18*p,high=13+18*p;
+    return kind==='sad' ? [
+      [[4,-8],[70,-8],[70,high],[4,low]],
+      [[58,-8],[124,-8],[124,low],[58,high]]
+    ] : [
+      [[4,-8],[70,-8],[70,low],[4,high]],
+      [[58,-8],[124,-8],[124,high],[58,low]]
+    ];
+  }
+  var ANIM={
+    blink:function(t){t=mod(t,350);var e=defEyes();var h=40;
+      if(t<128)h=40*(1-t/128);else if(t<176)h=0;else if(t<304)h=40*((t-176)/128);else h=40;
+      e.l.h=h;e.r.h=h;return{eyes:e,extras:[]};},
+    happy:function(t){t=mod(t,1150);var p=Math.min(1,t/50);
+      return{eyes:defEyes(),masks:t<1050?moodMasks('happy',p):[]};},
+    sad:function(t){t=mod(t,2400);var p=Math.min(1,t/200);
+      return{eyes:defEyes(),masks:t<2200?moodMasks('sad',p):[]};},
+    anger:function(t){t=mod(t,2400);var p=Math.min(1,t/200);
+      return{eyes:defEyes(),masks:t<2200?moodMasks('anger',p):[]};},
+    surprise:function(t){t=mod(t,650);var e=defEyes();var s=1;
+      var segs=[[0,75,1.0,0.9],[75,150,0.9,1.0],[150,225,1.0,1.1]];
+      for(var i=0;i<segs.length;i++){var q=segs[i];if(t>=q[0]&&t<q[1])s=lerp(q[2],q[3],(t-q[0])/(q[1]-q[0]));}
+      if(t>=225&&t<425)s=1.1;else if(t>=425&&t<500)s=lerp(1.1,1.0,(t-425)/75);
+      var w=40*s,h=40*s,r=Math.max(1,10*s);
+      e.l.w=w;e.l.h=h;e.l.r=r;e.r.w=w;e.r.h=h;e.r.r=r;return{eyes:e,extras:[]};},
+    wakeup:function(t){t=mod(t,1100);var e=defEyes();
+      e.l.h=e.r.h=t<100?2:40;return{eyes:e,extras:[]};},
+    sleep:function(t){t=mod(t,1100);var e=defEyes();
+      e.l.h=e.r.h=t<100?40:2;return{eyes:e,extras:[]};},
+    lookleft:function(t){t=mod(t,1150);var e=defEyes();var dx=0,g=0;
+      if(t<60){var p=ease(t/60);dx=-12*p;g=6*p;}
+      else if(t<1060){dx=-12;g=6;}
+      else if(t<1120){var p=ease((t-1060)/60);dx=-12*(1-p);g=6*(1-p);}
+      e.l.x+=dx;e.r.x+=dx;e.l.w=40+g;e.l.h=40+g;return{eyes:e,extras:[]};},
+    lookright:function(t){t=mod(t,1150);var e=defEyes();var dx=0,g=0;
+      if(t<60){var p=ease(t/60);dx=12*p;g=6*p;}
+      else if(t<1060){dx=12;g=6;}
+      else if(t<1120){var p=ease((t-1060)/60);dx=12*(1-p);g=6*(1-p);}
+      e.l.x+=dx;e.r.x+=dx;e.r.w=40+g;e.r.h=40+g;return{eyes:e,extras:[]};},
+    headnod:function(t){t=mod(t,1300);var e=defEyes();var b=Math.floor(t/400),cyc=t%400,dy=0;
+      if(b<3){if(cyc<200)dy=10*ease(cyc/200);else dy=10*(1-ease((cyc-200)/200));}
+      e.l.y+=dy;e.r.y+=dy;return{eyes:e,extras:[]};},
+    headshake:function(t){t=mod(t,750);var e=defEyes();var dx=0;
+      if(t<600)dx=10*Math.sin(2*Math.PI*t/120);e.l.x+=dx;e.r.x+=dx;return{eyes:e,extras:[]};},
+    headroll:function(t){t=mod(t,1350);var e=defEyes();var ox=0,oy=0;
+      if(t<1200){var a=2*Math.PI*t/1200;ox=5*Math.cos(a);oy=5*Math.sin(a);}
+      e.l.x+=ox;e.l.y+=oy;e.r.x+=ox;e.r.y+=oy;return{eyes:e,extras:[]};},
+    confused:function(t){t=mod(t,1100);var e=defEyes();
+      e.l.h=e.r.h=t<100?40:20;return{eyes:e,extras:[]};},
+    awkward:function(t){t=mod(t,1400);var e=defEyes();var h=40,extras=[];
+      if(t<200)h=lerp(40,4,ease(t/200));else if(t<1200)h=4;else h=lerp(4,40,ease((t-1200)/200));
+      if(t>=200&&t<1200)extras=[{type:'rect',x:104,y:10,w:2,h:10},{type:'rect',x:110,y:10,w:2,h:10},{type:'rect',x:116,y:9,w:2,h:12}];
+      e.l.h=h;e.r.h=h;return{eyes:e,extras:extras};},
+    cry:function(t){t=mod(t,2100);var e=defEyes();var h=40,tears=[];
+      if(t<300)h=lerp(40,32,ease(t/300));else if(t<1900)h=32;else h=lerp(32,40,ease((t-1900)/200));
+      e.l.h=h;e.r.h=h;
+      if(t>=300&&t<1900){var cyc=(t-300)%500;if(cyc<300){var p=ease(cyc/300),ty=44+p*20;
+        tears.push({type:'circle',x:39,y:ty,r:8},{type:'circle',x:89,y:ty,r:8});}}
+      return{eyes:e,extras:tears};},
+    laughing:function(t){t=mod(t,1400);var e=defEyes();var h=40,r=10,dx=0;
+      if(t<100)h=lerp(40,12,ease(t/100));
+      else if(t<1300){h=12;r=20;if(t>100&&t<600){var i=Math.floor((t-100)/100)%2;dx=i?2:-2;}}
+      else h=lerp(12,40,ease((t-1300)/100));
+      if(h<20)r=20;e.l.h=h;e.r.h=h;e.l.r=r;e.r.r=r;e.l.x+=dx;e.r.x+=dx;return{eyes:e,extras:[]};},
+    confident:function(t){t=mod(t,1500);var e=defEyes();var h=40,dx=0;
+      if(t<150)h=lerp(40,20,ease(t/150));else if(t<1300){h=20;dx=6;}else h=lerp(20,40,ease((t-1300)/200));
+      e.l.h=h;e.r.h=h;e.l.x+=dx;e.r.x+=dx;return{eyes:e,extras:[]};},
+    silly:function(t){t=mod(t,1800);var e=defEyes();var s=1,dx=0;
+      if(t<150)s=lerp(1,0.4,ease(t/150));else if(t<1000){s=0.4;dx=8*Math.sin(2*Math.PI*(t-150)/700);}
+      else if(t<1650)s=lerp(0.4,1,ease((t-1000)/650));
+      e.l.w=40*s;e.l.h=40*s;e.l.x+=dx;e.r.x+=dx;return{eyes:e,extras:[]};},
+    delicious:function(t){t=mod(t,1200);var e=defEyes();var s=1,dy=0;
+      if(t<150)s=lerp(1,0.7,ease(t/150));else if(t<1050){s=0.7;dy=-3;}else s=lerp(0.7,1,ease((t-1050)/150));
+      e.l.w=40*s;e.l.h=40*s;e.l.y+=dy;e.r.w=40*s;e.r.h=40*s;e.r.y+=dy;return{eyes:e,extras:[]};},
+    kissy:function(t){t=mod(t,1500);var e=defEyes();var s=1;
+      if(t<150)s=lerp(1,0.5,ease(t/150));else if(t<1200){var c=(t-150)%400;s=c<200?0.3:0.5;}else s=lerp(0.5,1,ease((t-1200)/300));
+      var w=40*s,h=40*s,r=w/2;e.l.w=w;e.l.h=h;e.l.r=r;e.r.w=w;e.r.h=h;e.r.r=r;return{eyes:e,extras:[]};},
+    cool:function(t){t=mod(t,1400);var e=defEyes();var h=40,dx=0;
+      if(t<150)h=lerp(40,16,ease(t/150));else if(t<1200){h=16;dx=6;}else h=lerp(16,40,ease((t-1200)/200));
+      e.l.h=h;e.r.h=h;e.l.x+=dx;e.r.x+=dx;return{eyes:e,extras:[]};},
+    relaxed:function(t){t=mod(t,1600);var e=defEyes();var h=40,w=40;
+      if(t<250)h=lerp(40,20,ease(t/250));else if(t<1400){h=20;w=36;}else h=lerp(20,40,ease((t-1400)/200));
+      if(t>=850&&t<1200){var p=(t-850)/350;h=20*(1-Math.sin(Math.PI*p));if(h<1)h=0;}
+      e.l.h=h;e.r.h=h;e.l.w=w;e.r.w=w;return{eyes:e,extras:[]};},
+    thinking:function(t){t=mod(t,1800);var e=defEyes();var s=1,dx=0,dy=0;
+      if(t<200)s=lerp(1,0.3,ease(t/200));else if(t<1400){s=0.3;dy=-4;dx=6*Math.sin(2*Math.PI*(t-200)/800);}
+      else if(t<1600)s=lerp(0.3,1,ease((t-1400)/200));
+      e.r.w=40*s;e.r.h=40*s;e.l.x+=dx;e.r.x+=dx;e.l.y+=dy;e.r.y+=dy;return{eyes:e,extras:[]};},
+    loving:function(t){t=mod(t,3100);var e=defEyes(),w=40,h=40,r=10;
+      if(t<200){var p=t/200;w=32+8*p;h=28+12*p;r=10+15*p;}
+      else if(t<2600){var beat=mod(t-200,800);var s=beat<400?1+0.2*beat/400:1.2-0.2*(beat-400)/400;
+        w=40*s;h=40*s;r=25;}
+      else if(t<3000){w=40;h=40;r=25;}
+      e.l.w=e.r.w=w;e.l.h=e.r.h=h;e.l.r=e.r.r=r;return{eyes:e,extras:[]};},
+    shocked:function(t){t=mod(t,900);var e=defEyes(),s=1,dx=0,dy=0;
+      if(t<50)s=1+0.4*Math.floor(t/10)/4;
+      else if(t<790){s=1.4;if(t<290){var i=Math.floor((t-50)/30);dx=i%2? -1:1;dy=Math.floor(i/2)%2? -1:1;}}
+      e.l.w=e.r.w=40*s;e.l.h=e.r.h=40*s;e.l.r=e.r.r=20*s;
+      e.l.x+=dx;e.r.x+=dx;e.l.y+=dy;e.r.y+=dy;return{eyes:e,extras:[]};},
+    embarrassed:function(t){t=mod(t,1500);var e=defEyes();var s=1,dy=0,dx=0;
+      if(t<150)s=lerp(1,0.7,ease(t/150));else if(t<1200){s=0.7;dy=5;if(t<950){var i=Math.floor((t-150)/130)%2;dx=i?2:-2;}}
+      else s=lerp(0.7,1,ease((t-1200)/300));
+      var w=40*s,h=40*s;e.l.w=w;e.l.h=h;e.l.y+=dy;e.l.x+=dx;e.r.w=w;e.r.h=h;e.r.y+=dy;e.r.x+=dx;return{eyes:e,extras:[]};},
+    funny:function(t){t=mod(t,1400);var e=defEyes();var ls=1,rs=1;
+      if(t<200){ls=lerp(1,1.5,ease(t/200));rs=lerp(1,0.6,ease(t/200));}
+      else if(t<1200){ls=1.5;rs=0.6;}else{ls=lerp(1.5,1,ease((t-1200)/200));rs=lerp(0.6,1,ease((t-1200)/200));}
+      e.l.w=40*ls;e.l.h=40*ls;e.r.w=40*rs;e.r.h=40*rs;return{eyes:e,extras:[]};}
+  };
+
+  var LIST=[
+    ['blink','眨眼','Blink'],['happy','开心','Happy'],['sad','悲伤','Sad'],['anger','愤怒','Anger'],
+    ['surprise','惊讶','Surprise'],['wakeup','唤醒','Wakeup'],['sleep','睡眠','Sleep'],
+    ['lookleft','向左看','Look Left'],['lookright','向右看','Look Right'],
+    ['headnod','点头*','Head Nod'],['headshake','摇头*','Head Shake'],['headroll','转圈*','Head Roll'],
+    ['confused','困惑','Confused'],['awkward','尴尬','Awkward'],['cry','哭泣','Cry'],
+    ['laughing','大笑','Laughing'],['funny','滑稽','Funny'],['loving','爱心','Loving'],
+    ['embarrassed','害羞','Embarrassed'],['shocked','震惊','Shocked'],['thinking','思考','Thinking'],
+    ['cool','酷','Cool'],['relaxed','放松','Relaxed'],['delicious','美味','Delicious'],
+    ['kissy','亲亲','Kissy'],['confident','自信','Confident'],['silly','偷笑','Silly']
+  ];
+
+  // 与 SelectRandomAnimation() 一致：60/18/18/2/2。
+  var rndKey='blink',rndUntil=0,rndStart=0;
+  function randomAnim(t){
+    if(t>=rndUntil){
+      var n=Math.random()*100;
+      rndKey=n<60?'blink':n<78?'lookleft':n<96?'lookright':n<98?'headroll':'confused';
+      rndStart=t;rndUntil=t+2500;
+    }
+    return ANIM[rndKey](t-rndStart);
+  }
+
+  var grid=document.getElementById('grid');
+  var tiles={};
+  LIST.forEach(function(item){
+    var key=item[0];
+    var div=document.createElement('div');div.className='tile';
+    div.innerHTML='<div class="face"><canvas width="'+W*S+'" height="'+H*S+'"></canvas></div>'+
+      '<div class="cap"><b>'+item[1]+'</b><i>'+item[2]+'</i></div>';
+    grid.appendChild(div);
+    var c=div.querySelector('canvas'),ctx=c.getContext('2d');
+    ctx.scale(S,S);
+    tiles[key]={div:div,ctx:ctx,fn:ANIM[key]};
+    div.addEventListener('click',function(){openModal(key,item[1]+' · '+item[2]);});
+  });
+  // 随机格
+  var rd=document.createElement('div');rd.className='tile';
+  rd.innerHTML='<div class="face"><canvas width="'+W*S+'" height="'+H*S+'"></canvas></div>'+
+    '<div class="cap"><b>随机</b><i>Random</i></div>';
+  grid.appendChild(rd);
+  var rc=rd.querySelector('canvas'),rctx=rc.getContext('2d');rctx.scale(S,S);
+  rd.addEventListener('click',function(){openModal('random','随机 · Random');});
+
+  function openModal(key,title){
+    document.getElementById('mTitle').textContent=title;
+    document.getElementById('modal').classList.add('open');
+    mkey=key;
+  }
+  var mkey=null;
+  var mCanvas=document.getElementById('mCanvas'),mctx=mCanvas.getContext('2d');
+  mctx.scale(560/128,280/64);
+  document.getElementById('mClose').addEventListener('click',function(){document.getElementById('modal').classList.remove('open');mkey=null;});
+  document.getElementById('modal').addEventListener('click',function(e){if(e.target===this){this.classList.remove('open');mkey=null;}});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){document.getElementById('modal').classList.remove('open');mkey=null;}});
+
+  var elapsed=0,last=performance.now(),paused=false,rate=1;
+  document.getElementById('toggle').addEventListener('click',function(){
+    paused=!paused;this.textContent=paused?'继续播放':'暂停全部';
+  });
+  document.getElementById('restart').addEventListener('click',function(){
+    elapsed=0;rndUntil=0;
+  });
+  document.getElementById('speed').addEventListener('input',function(){
+    rate=Number(this.value);document.getElementById('speedValue').textContent=rate+'×';
+  });
+  function frame(timestamp){
+    if(!paused)elapsed+=Math.min(timestamp-last,100)*rate;
+    last=timestamp;
+    var now=elapsed;
+    for(var k in tiles){drawScene(tiles[k].ctx,now,ANIM[k]);}
+    drawScene(rctx,now,randomAnim);
+    if(mkey){drawScene(mctx,now,mkey==='random'?randomAnim:ANIM[mkey]);}
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
